@@ -114,15 +114,12 @@ class CollectorRecognizer:
         best = ranked[0]
         score = float(best['score'])
         margin = score-float(ranked[1]['score']) if len(ranked)>1 else score
-        # TEMP: not check confidence
-        # if score < self.min_score or margin < self.min_margin:
-        if margin < self.min_margin:
-            if len(ranked) > 1:
-                reason = 'The two closest card identities scored too similarly.'
-            else:
-                reason = 'The only candidate scored too close to the zero baseline.'
-            reason += f' The score gap was {margin:.3f} and the required gap is {self.min_margin:.3f}.'
-            return None, score, margin, reason
+        # Temporarily accept the highest-scoring candidate for inspection.
+        # if score < self.min_score:
+        #     return None, score, margin, 'The best match scored below the similarity cutoff.'
+        # if margin < self.min_margin:
+        #     reason = f'The score gap was {margin:.3f} and the required gap is {self.min_margin:.3f}.'
+        #     return None, score, margin, reason
         return self.store.load(best), score, margin, None
 
 def create_recognizer(backend='collectorvision', **kwargs):

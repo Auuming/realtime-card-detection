@@ -62,7 +62,7 @@ Video / webcam / direct stream
 
 Detection is submitted at most 20 times per second, bounded by actual compute time. It never runs catalog recognition. Selected-card recognition has its own worker. A newer click supersedes the old request; changing source clears pending details. The selection uses the exact frame that produced its border. Borders may still lag on fast movement because no temporal tracker is implemented. Video FPS depends on decoding and UI overhead. A blocked OpenCV network-stream read can still delay the UI.
 
-The corner model refines the clicked region. When it returns no valid card, the selected polygon supplies the fallback warp. Search checks both 0° and 180° orientations. Same-Oracle reprints are grouped for ambiguity checking because gameplay identity is the objective. The `0.78` cosine similarity cutoff is temporarily commented out so you can inspect low-scoring matches. The `0.025` minimum gap between distinct Oracle identities still applies. The details panel shows cosine similarity as a percentage and a raw score.
+The corner model refines the clicked region. When it returns no valid card, the selected polygon supplies the fallback warp. Search checks both 0° and 180° orientations. Same-Oracle reprints are grouped by card identity. The `0.78` cosine similarity cutoff and `0.025` minimum score gap are temporarily commented out. The app shows the highest-scoring candidate when the search returns one, along with its cosine similarity as a percentage and a raw score.
 
 The ORB baseline remains available:
 
