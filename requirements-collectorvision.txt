@@ -1,0 +1,3 @@
+-r requirements.txt
+collectorvision[hf] @ https://github.com/HanClinto/CollectorVision/archive/8b295ab80a997766afc00c640a616c1f2716df21.zip
+onnxruntime>=1.23,<2
