@@ -35,6 +35,11 @@ class App:
         self.last_submit = 0
         self.last_read = 0
         self.interval = 1/30
+        self.video_fps = 0
+        self.video_frames = 0
+        self.video_frame = -1
+        self.video_ended = False
+        self.scrubbing = False
         bar = ttk.Frame(root, padding=10)
         bar.pack(fill='x')
         ttk.Label(bar, text='TABLELENS', font=('Segoe UI', 18, 'bold')).pack(side='left', padx=10)
@@ -59,6 +64,15 @@ class App:
         self.set_text('Open a webcam, video file, or direct RTSP/HTTP video stream.\n\nClick a detected card to inspect its reference image and rules.\n\n'+self.recognizer.description+'\n\nFirst lookup of a card needs internet for its image and rules; later lookups use the local cache.')
         self.status = tk.StringVar(value='Ready | '+ ('YOLO detector' if model else 'Contour baseline'))
         ttk.Label(root, textvariable=self.status, padding=8).pack(fill='x')
+        self.timeline = ttk.Frame(root, padding=(10, 0, 10, 8))
+        self.playhead = tk.DoubleVar()
+        self.time_text = tk.StringVar()
+        self.seek_bar = ttk.Scale(self.timeline, variable=self.playhead, command=self.seek)
+        self.seek_bar.pack(side='left', fill='x', expand=True, padx=(0, 10))
+        self.seek_bar.bind('<ButtonPress-1>', self.begin_scrub)
+        self.seek_bar.bind('<B1-Motion>', self.preview_scrub)
+        self.seek_bar.bind('<ButtonRelease-1>', self.end_scrub)
+        ttk.Label(self.timeline, textvariable=self.time_text).pack(side='right')
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(20, self.tick)
 
@@ -80,6 +94,12 @@ class App:
     def start(self, source, is_file):
         if self.capture:
             self.capture.release()
+        self.timeline.pack_forget()
+        self.video_frames = 0
+        self.video_frame = -1
+        self.video_ended = False
+        self.scrubbing = False
+        self.last_read = 0
         self.generation += 1
         self.boxes = []
         self.frame = None
@@ -98,10 +118,84 @@ class App:
         fps = self.capture.get(cv2.CAP_PROP_FPS)
         self.interval = 1/fps if is_file and 1 < fps < 240 else 1/30
         self.is_file, self.paused = is_file, False
+        if is_file:
+            frames = self.capture.get(cv2.CAP_PROP_FRAME_COUNT)
+            if np.isfinite(frames) and frames >= 1 and np.isfinite(fps) and fps > 0:
+                self.video_frames = int(frames)
+                self.video_fps = fps
+                self.seek_bar.configure(to=max(1, self.video_frames-1))
+                self.update_timeline(0)
+                self.timeline.pack(fill='x')
         self.status.set('Running | click a card for details')
 
     def toggle(self):
+        if self.video_ended:
+            if self.seek(0):
+                self.paused = False
+            return
         self.paused = not self.paused
+
+    @staticmethod
+    def format_time(seconds):
+        minutes, seconds = divmod(int(seconds), 60)
+        if minutes >= 60:
+            hours, minutes = divmod(minutes, 60)
+            return f'{hours}:{minutes:02d}:{seconds:02d}'
+        return f'{minutes:02d}:{seconds:02d}'
+
+    def update_timeline(self, frame):
+        self.playhead.set(min(frame, max(1, self.video_frames-1)))
+        elapsed = self.format_time(frame/self.video_fps)
+        duration = self.format_time(self.video_frames/self.video_fps)
+        self.time_text.set(f'{elapsed} / {duration}')
+
+    def begin_scrub(self, event):
+        self.scrubbing = True
+        self.seek_bar.focus_set()
+        return self.preview_scrub(event)
+
+    def preview_scrub(self, event):
+        if self.scrubbing:
+            self.update_timeline(self.seek_bar.get(event.x, event.y))
+        return 'break'
+
+    def end_scrub(self, event):
+        if self.scrubbing:
+            self.scrubbing = False
+            self.seek(self.seek_bar.get(event.x, event.y))
+        return 'break'
+
+    def seek(self, frame):
+        if not self.capture or not self.video_frames:
+            return False
+        target = min(max(round(float(frame)), 0), self.video_frames-1)
+        if self.capture.set(cv2.CAP_PROP_POS_FRAMES, target):
+            ok, image = self.capture.read()
+            if ok:
+                self.generation += 1
+                self.boxes = []
+                self.detection_frame = None
+                if self.pending:
+                    self.pending.cancel()
+                self.video_frame = target
+                self.video_ended = False
+                self.update_timeline(target)
+                self.last_read = time.perf_counter()
+                self.set_frame(image)
+                self.submit_detection(self.last_read)
+                return True
+            self.capture.set(cv2.CAP_PROP_POS_FRAMES, self.video_frame+1)
+        self.update_timeline(self.video_frames if self.video_ended else max(self.video_frame, 0))
+        self.status.set('Could not seek to that point in the video')
+        return False
+
+    def set_frame(self, frame):
+        scale = min(1., 1100/frame.shape[1])
+        self.frame = cv2.resize(frame, None, fx=scale, fy=scale)
+
+    def submit_detection(self, now):
+        self.pending = self.pool.submit(self.analyze, self.frame.copy(), self.generation)
+        self.last_submit = now
 
     def analyze(self, frame, generation):
         started = time.perf_counter()
@@ -129,7 +223,8 @@ class App:
                 if generation == self.generation:
                     self.boxes = boxes
                     self.detection_frame = snapshot
-                    self.status.set(f'{len(boxes)} card regions | detection {ms:.0f} ms | click a border for details')
+                    if not self.video_ended:
+                        self.status.set(f'{len(boxes)} card regions | detection {ms:.0f} ms | click a border for details')
             except Exception as e:
                 self.status.set('Analysis error: '+str(e))
             self.pending = None
@@ -141,15 +236,21 @@ class App:
                 self.set_text('Could not identify the selected card: '+str(e))
             self.detail_pending = None
         now = time.perf_counter()
-        if self.capture and not self.paused and now-self.last_read >= self.interval:
+        if self.capture and not self.paused and not self.scrubbing and now-self.last_read >= self.interval:
             ok, frame = self.capture.read()
             self.last_read = now
             if ok:
-                scale = min(1., 1100/frame.shape[1])
-                self.frame = cv2.resize(frame, None, fx=scale, fy=scale)
+                self.set_frame(frame)
+                if self.video_frames:
+                    self.video_frame = min(self.video_frame+1, self.video_frames-1)
+                    self.update_timeline(self.video_frame)
                 if self.pending is None and now-self.last_submit >= .05:
-                    self.pending = self.pool.submit(self.analyze, self.frame.copy(), self.generation)
-                    self.last_submit = now
+                    self.submit_detection(now)
+            elif self.video_frames:
+                self.paused = True
+                self.video_ended = True
+                self.update_timeline(self.video_frames)
+                self.status.set('Video ended | drag the timeline or resume to replay')
             else:
                 self.capture.release()
                 self.capture = None
