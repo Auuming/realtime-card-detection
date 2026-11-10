@@ -230,8 +230,8 @@ class App:
             self.pending = None
         if self.detail_pending and self.detail_pending.done():
             try:
-                key, count, margin = self.detail_pending.result()
-                self.show_detail(key, count)
+                key, count, _, *reason = self.detail_pending.result()
+                self.show_detail(key, count, *reason)
             except Exception as e:
                 self.set_text('Could not identify the selected card: '+str(e))
             self.detail_pending = None
@@ -288,10 +288,16 @@ class App:
                 self.detail_pending = self.detail_pool.submit(self.recognizer.identify, warp(self.detection_frame, pts))
             break
 
-    def show_detail(self, key, count):
+    def show_detail(self, key, count, reason=None):
+        score = f'{count:.1%} ({count:.3f})' if isinstance(count, float) else str(count)
+        score_line = f'{self.recognizer.score_label}: {score}'
         if not key:
             self.image_label.configure(image='')
-            self.set_text('Unknown card\n\nMove closer, reduce glare, and keep the full face visible. This artwork may be missing from the recognition catalog.\n\nA weak match is not treated as an identity.')
+            message = 'Unknown card'
+            if count:
+                message += f'\n{score_line}'
+            reason = reason or 'The recognizer could not verify a unique reference match.'
+            self.set_text(f'{message}\n\nReason for rejection\n{reason}')
             return
         card = self.recognizer.cards[key]
         if card.get('image'):
@@ -302,9 +308,8 @@ class App:
             self.image_label.configure(image=self.detail_photo)
         else:
             self.image_label.configure(image='')
-        score = f'{count:.3f}' if isinstance(count, float) else str(count)
         warning = card.get('warning', '')
-        self.set_text(f"{card['name']}\n{card['mana_cost']}\n{card['type_line']}\n\n{card['oracle_text']}\n\nSet: {card['set']} #{card['collector_number']}\n{self.recognizer.score_label}: {score}\n\nRules text cached from Scryfall.\n{warning}")
+        self.set_text(f"{card['name']}\n{card['mana_cost']}\n{card['type_line']}\n{score_line}\n\n{card['oracle_text']}\n\nSet: {card['set']} #{card['collector_number']}\n\nRules text cached from Scryfall.\n{warning}")
 
     def close(self):
         if self.capture:

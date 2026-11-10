@@ -89,14 +89,17 @@ class CollectorRecognizer:
         else:
             normalized = points/np.float32([frame.shape[1], frame.shape[0]])
             crop = self.cvg.DetectionResult(normalized.astype(np.float32)).dewarp(frame)
-        return self._identify_pil(crop)
+        return self._match_crop(crop)
 
     def identify(self, crop):
         return self._identify_pil(Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)))
 
     def _identify_pil(self, crop):
+        return self._match_crop(crop)[:3]
+
+    def _match_crop(self, crop):
         if np.asarray(crop.convert('L')).std() < 8:
-            return None, 0., 0.
+            return None, 0., 0., 'The straightened crop had too little contrast for a catalog search.'
         # Upstream notes that embeddings are sensitive to upside-down cards.
         variants = [crop, crop.transpose(Image.Transpose.ROTATE_180)]
         groups = {}
@@ -107,13 +110,20 @@ class CollectorRecognizer:
                     groups[identity] = match
         ranked = sorted(groups.values(), key=lambda m: -m['score'])
         if not ranked:
-            return None, 0., 0.
+            return None, 0., 0., 'The catalog search returned no candidates.'
         best = ranked[0]
         score = float(best['score'])
         margin = score-float(ranked[1]['score']) if len(ranked)>1 else score
-        if score < self.min_score or margin < self.min_margin:
-            return None, score, margin
-        return self.store.load(best), score, margin
+        # TEMP: not check confidence
+        # if score < self.min_score or margin < self.min_margin:
+        if margin < self.min_margin:
+            if len(ranked) > 1:
+                reason = 'The two closest card identities scored too similarly.'
+            else:
+                reason = 'The only candidate scored too close to the zero baseline.'
+            reason += f' The score gap was {margin:.3f} and the required gap is {self.min_margin:.3f}.'
+            return None, score, margin, reason
+        return self.store.load(best), score, margin, None
 
 def create_recognizer(backend='collectorvision', **kwargs):
     if backend == 'orb':
