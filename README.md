@@ -21,6 +21,8 @@ Setup creates the local `.venv` and downloads the pretrained models and MTG cata
 
 Purple borders mark detected regions. Click inside one to load its details. Details remain visible until another click or source change. **Pause / resume** freezes playback for inspection.
 
+The selected video crop appears immediately. Local recognition displays the name without waiting for Scryfall; metadata and the reference image load in a separate background worker. The panel labels the video crop and replaces it with the reference image when ready. Cached images are reused, failed requests have a 60-second retry cooldown, and **Retry image / details** explicitly retries sooner. Interactive requests use 3-second connect and 6-second read timeouts; those are per-request/socket timeouts, not a total loading deadline. New clicks and seeks discard the previous selection's display requests.
+
 Recognition runs locally after setup. The first lookup of an uncached card needs internet for its rules and reference image. Later lookups reuse `data/details/`. Download failure preserves the recognized name with a missing-details message. Cached rules do not automatically refresh; remove the relevant cached JSON/image files for an explicit refresh.
 
 ## Reinstall / another computer
@@ -126,6 +128,7 @@ Bulk imports accept JSON arrays/JSONL, optionally gzip, and reuse downloaded ima
 .\.venv\Scripts\python.exe verify_collector.py
 .\.venv\Scripts\python.exe verify_app.py
 .\.venv\Scripts\python.exe verify_offline.py
+.\.venv\Scripts\python.exe verify_image_loading.py
 ```
 
 - Unit checks: multi-card localization, tapped/portrait warps, blank rejection, double-face details, and network failure handling.

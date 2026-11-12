@@ -16,7 +16,7 @@ class App:
         self.root = root
         root.title('TableLens | Magic: The Gathering')
         root.geometry('1280x850')
-        self.recognizer = recognizer or create_recognizer(backend)
+        self.recognizer = recognizer or create_recognizer(backend, defer_details=True)
         self.model = None
         if model:
             from ultralytics import YOLO
@@ -29,6 +29,13 @@ class App:
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.detail_pool = ThreadPoolExecutor(max_workers=1)
         self.detail_pending = None
+        self.asset_pool = ThreadPoolExecutor(max_workers=1)
+        self.asset_pending = None
+        self.selected_key = None
+        self.selected_score = 0
+        self.displayed_card = None
+        self.selection_token = 0
+        self.preview_photo = None
         self.detection_frame = None
         self.frame = None
         self.boxes = []
@@ -59,6 +66,11 @@ class App:
         ttk.Label(side, text='CARD DETAILS', font=('Segoe UI', 16, 'bold')).pack(anchor='w')
         self.image_label = ttk.Label(side)
         self.image_label.pack(pady=10)
+        self.image_status = tk.StringVar(value='')
+        ttk.Label(side, textvariable=self.image_status, wraplength=275).pack()
+        self.retry_button = ttk.Button(side, text='Retry image / details', command=lambda: self.load_assets(force=True))
+        self.retry_button.pack(pady=4)
+        self.retry_button.state(['disabled'])
         self.text = tk.Text(side, wrap='word', font=('Segoe UI', 11), height=20, relief='flat')
         self.text.pack(fill='both', expand=True)
         self.set_text('Open a webcam, video file, or direct RTSP/HTTP video stream.\n\nClick a detected card to inspect its reference image and rules.\n\n'+self.recognizer.description+'\n\nFirst lookup of a card needs internet for its image and rules; later lookups use the local cache.')
@@ -104,10 +116,7 @@ class App:
         self.boxes = []
         self.frame = None
         self.detection_frame = None
-        if self.detail_pending:
-            self.detail_pending.cancel()
-            self.detail_pending = None
-        self.image_label.configure(image='')
+        self.clear_selection()
         self.set_text('Click a card border to identify it and load its details.')
         self.capture = cv2.VideoCapture(source)
         if not self.capture.isOpened():
@@ -173,6 +182,8 @@ class App:
             ok, image = self.capture.read()
             if ok:
                 self.generation += 1
+                self.clear_selection()
+                self.set_text('Click a card border to identify it and load its details.')
                 self.boxes = []
                 self.detection_frame = None
                 if self.pending:
@@ -232,9 +243,25 @@ class App:
             try:
                 key, count, _, *reason = self.detail_pending.result()
                 self.show_detail(key, count, *reason)
+                if key:
+                    self.load_assets()
             except Exception as e:
                 self.set_text('Could not identify the selected card: '+str(e))
             self.detail_pending = None
+        if self.asset_pending and self.asset_pending[1].done():
+            token, future = self.asset_pending
+            try:
+                future.result()
+            except Exception as e:
+                if token == self.selection_token:
+                    self.image_status.set('Video crop • reference download failed: '+str(e))
+            self.asset_pending = None
+            if self.selected_key:
+                self.retry_button.state(['!disabled'])
+        if self.selected_key:
+            card = self.recognizer.cards[self.selected_key]
+            if card is not self.displayed_card:
+                self.show_detail(self.selected_key, self.selected_score)
         now = time.perf_counter()
         if self.capture and not self.paused and not self.scrubbing and now-self.last_read >= self.interval:
             ok, frame = self.capture.read()
@@ -278,9 +305,12 @@ class App:
                 continue
             # Use the exact frame that produced this polygon, so movement
             # during recognition cannot change the requested card crop.
-            if self.detail_pending:
-                self.detail_pending.cancel()
-            self.image_label.configure(image='')
+            self.clear_selection()
+            preview = Image.fromarray(cv2.cvtColor(warp(self.detection_frame, pts), cv2.COLOR_BGR2RGB))
+            preview.thumbnail((260,350))
+            self.preview_photo = ImageTk.PhotoImage(preview)
+            self.image_label.configure(image=self.preview_photo)
+            self.image_status.set('Selected video crop • identifying…')
             self.set_text('Identifying selected card…\n\nVideo and card borders continue updating.')
             if hasattr(self.recognizer, 'identify_selection'):
                 self.detail_pending = self.detail_pool.submit(self.recognizer.identify_selection, self.detection_frame.copy(), pts.copy())
@@ -288,11 +318,37 @@ class App:
                 self.detail_pending = self.detail_pool.submit(self.recognizer.identify, warp(self.detection_frame, pts))
             break
 
+    def clear_selection(self):
+        self.selection_token += 1
+        for future in [self.detail_pending, self.asset_pending[1] if self.asset_pending else None]:
+            if future:
+                future.cancel()
+        self.detail_pending = None
+        self.asset_pending = None
+        self.selected_key = None
+        self.displayed_card = None
+        self.preview_photo = None
+        self.image_label.configure(image='')
+        self.image_status.set('')
+        self.retry_button.state(['disabled'])
+
+    def load_assets(self, force=False):
+        store = getattr(self.recognizer, 'store', None)
+        if not self.selected_key or not store or not hasattr(store, 'refresh'):
+            return
+        if self.asset_pending:
+            return
+        self.retry_button.state(['disabled'])
+        self.asset_pending = (self.selection_token,
+                              self.asset_pool.submit(store.refresh, self.selected_key, force=force))
+
     def show_detail(self, key, count, reason=None):
         score = f'{count:.1%} ({count:.3f})' if isinstance(count, float) else str(count)
         score_line = f'{self.recognizer.score_label}: {score}'
         if not key:
+            self.selected_key = None
             self.image_label.configure(image='')
+            self.image_status.set('No verified reference match')
             message = 'Unknown card'
             if count:
                 message += f'\n{score_line}'
@@ -300,16 +356,26 @@ class App:
             self.set_text(f'{message}\n\nReason for rejection\n{reason}')
             return
         card = self.recognizer.cards[key]
+        self.selected_key, self.selected_score = key, count
+        self.displayed_card = card
         if card.get('image'):
-            with Image.open(ROOT/card['image']) as source:
-                im = source.copy()
-            im.thumbnail((260,350))
-            self.detail_photo = ImageTk.PhotoImage(im)
-            self.image_label.configure(image=self.detail_photo)
+            try:
+                with Image.open(ROOT/card['image']) as source:
+                    im = source.copy()
+                im.thumbnail((260,350))
+                self.detail_photo = ImageTk.PhotoImage(im)
+                self.image_label.configure(image=self.detail_photo)
+                self.image_status.set('Reference image • cached locally')
+            except (OSError, ValueError):
+                self.image_label.configure(image=self.preview_photo or '')
+                self.image_status.set('Video crop • cached reference image could not be opened')
         else:
-            self.image_label.configure(image='')
+            self.image_label.configure(image=self.preview_photo or '')
+            state = card.get('image_state', 'absent')
+            self.image_status.set('Video crop • '+('loading reference image…' if state == 'pending' else 'reference image unavailable'))
         warning = card.get('warning', '')
-        self.set_text(f"{card['name']}\n{card['mana_cost']}\n{card['type_line']}\n{score_line}\n\n{card['oracle_text']}\n\nSet: {card['set']} #{card['collector_number']}\n\nRules text cached from Scryfall.\n{warning}")
+        details_note = 'Loading card details…' if card.get('details_state') == 'pending' else ('Rules text cached from Scryfall.' if card.get('details_state', 'ready') == 'ready' else 'Full card details unavailable.')
+        self.set_text(f"{card['name']}\n{card['mana_cost']}\n{card['type_line']}\n{score_line}\n\n{card['oracle_text']}\n\nSet: {card['set']} #{card['collector_number']}\n\n{details_note}\n{warning}")
 
     def close(self):
         if self.capture:
@@ -319,6 +385,7 @@ class App:
         # variables on the worker thread and crash Tcl during shutdown.
         self.pool.shutdown(wait=True,cancel_futures=True)
         self.detail_pool.shutdown(wait=True,cancel_futures=True)
+        self.asset_pool.shutdown(wait=True,cancel_futures=True)
         self.pending = None
         self.detail_pending = None
         self.root.destroy()

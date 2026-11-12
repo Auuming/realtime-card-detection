@@ -10,19 +10,19 @@ ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'data'
 HEADERS = {'User-Agent': 'TableLens-StudentCV/0.1', 'Accept': 'application/json;q=0.9,*/*;q=0.8'}
 
-def download(url, target):
+def download(url, target, timeout=(10, 90)):
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_suffix(target.suffix + '.part')
-    with requests.get(url, headers=HEADERS, stream=True, timeout=(10, 90)) as r:
+    with requests.get(url, headers=HEADERS, stream=True, timeout=timeout) as r:
         r.raise_for_status()
         with temp.open('wb') as f:
             for chunk in r.iter_content(1024 * 1024):
                 f.write(chunk)
     temp.replace(target)
 
-def api(url):
+def api(url, timeout=60):
     time.sleep(0.15)
-    r = requests.get(url, headers=HEADERS, timeout=60)
+    r = requests.get(url, headers=HEADERS, timeout=timeout)
     r.raise_for_status()  # Stop on rate limits; never hammer the service.
     return r.json()
 
